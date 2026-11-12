@@ -24,10 +24,15 @@ _bb_session() { # jar 里保证有核心会话（-b 保留 jar 里已有的 cook
 }
 
 _bb_api() { # <路径> [curl 参数…]：带用户会话调应用接口。
-  # dev.sh probes 的数据钩子阶段不导出 SMOKE_*，套件的 dweb 自会备好会话；
-  # e2e 套件没有 dweb，只给 SMOKE_*，这里现场取 origin、补核心会话再调。
+  # dweb 两边签名不同：dev 套件已带 --jar，e2e 套件是裸 dev.sh web（用自己的默认 jar）。
+  # 显式再传 --jar：让取 csrftoken 的 jar 和发请求用的 jar 永远是同一份（e2e 实测：
+  # 不传的话 POST 用默认 jar 的会话，X-CSRFToken 却来自 SMOKE_JAR，Django 报 header incorrect）。
   if declare -F dweb >/dev/null; then
-    dweb "$@"
+    if [[ -n "${SMOKE_JAR:-}" ]]; then
+      dweb --jar "$SMOKE_JAR" "$@"
+    else
+      dweb "$@"
+    fi
     return
   fi
   _bb_session || return 1
@@ -60,11 +65,12 @@ data_write() {
   marker="probe-$(date +%s)-$RANDOM"
   # Z 结尾：DRF 的 ISO 解析认它，也不用担心 + 在 URL 查询串里被解成空格。
   time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  csrf="$(_csrf)"
+  # 先 GET 一次：应用会话（和它带的 csrftoken）建好后再取 token，POST 才能配上。
   out="$(_bb_api /api/children/ -w '\n%{http_code}')" || { echo "列不出宝宝：$out"; return 1; }
   code="${out##*$'\n'}"
   [[ "$code" == 200 ]] || { echo "列宝宝不是 200（$code）：$out"; return 1; }
   child="$(jq -r '.results[0].id // empty' <<<"${out%$'\n'*}")"
+  csrf="$(_csrf)"
   if [[ -z "$child" ]]; then
     out="$(_bb_api /api/children/ -X POST -H 'Content-Type: application/json' -H "X-CSRFToken: $csrf" \
       -d '{"first_name":"宝宝","birth_date":"2026-01-01"}' -w '\n%{http_code}')" ||
@@ -73,7 +79,6 @@ data_write() {
     child="$(jq -r '.id // empty' <<<"${out%$'\n'*}")"
     [[ "$code" == 201 && -n "$child" ]] || { echo "建宝宝没成（$code）：$out"; return 1; }
   fi
-  csrf="$(_csrf)"
   out="$(_bb_api /api/notes/ -X POST -H 'Content-Type: application/json' -H "X-CSRFToken: $csrf" \
     -d "{\"child\":$child,\"note\":\"$marker\",\"time\":\"$time\"}" -w '\n%{http_code}')" ||
     { echo "写记录请求失败：$out"; return 1; }
