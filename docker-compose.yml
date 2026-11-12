@@ -1,78 +1,147 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# Baby Buddy：喂奶、换尿布、睡觉这些育儿记录，全家多人一起记。
+# 上游是 Django 单体应用；LinuxServer.io 的官方镜像用 s6 起 nginx（8000）和 gunicorn（127.0.0.1:3000），
+# SQLite 和用户文件都在 /config。
 services:
   web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+    # 上游官方镜像（LinuxServer.io 打包），按清单列表摘要固定，amd64/arm64 都有。
+    image: linuxserver/babybuddy:v2.11.0-ls258@sha256:4ffb1fdb8d284f5928394086e9d83d989930942af3786962bde7696100df78e2
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      # LinuxServer 镜像通用变量：容器内降权到这个用户，宿主上的数据文件归用户的用户。
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      # 代登录：上游开着 REVERSE_PROXY_AUTH 就认 REMOTE_USER（HTTP 头 Remote-User），正是网关注入的头。
+      # 上游没有"只信某个代理地址"的开关，靠网络隔离兜住：不申请 egress、不开局域网端口，
+      # 插件网络里只有核心和本插件的服务，别的来源到不了这个容器。
+      REVERSE_PROXY_AUTH: "True"
+      # 密钥由核心生成注入，不依赖镜像自己写进 /config/.secretkey 的那份。
+      SECRET_KEY: $WONTON_SECRET_APP_KEY
+      # 网关按真实协议发 X-Forwarded-Proto，上游见到这个变量即启用对应的 SECURE_PROXY_SSL_HEADER。
+      SECURE_PROXY_SSL_HEADER: "1"
+      # 浏览器地址进 CSRF 白名单（Django 校验写请求的来源）。
+      CSRF_TRUSTED_ORIGINS: ${WONTON_APP_URL}
+      # 上游镜像的默认值，这里显式写出：容器只在插件网络里可达，入口由网关按域名路由，
+      # CSRF 已经收紧；ALLOWED_HOSTS 不认带协议的地址，而 WONTON_APP_URL 的主机名在 compose 插值里取不出来。
+      ALLOWED_HOSTS: "*"
+    # SQLite、用户上传和会话都在 /config 下，卸载不删数据时这里原样保留。
+    volumes:
+      - ${WONTON_APP_DATA}/config:/config
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      start_period: 60s
+      start_interval: 2s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  # 一次性初始化：等 web 健康后把主人提为管理员、设成中文界面，并把上游 migrate
+  # 自动建的 admin/admin 账号改成核心生成的随机密码（主人可在 App 里查看）。
+  # 每次重建容器都会重跑，全部用 update_or_create / set_password，幂等。
+  init:
+    image: linuxserver/babybuddy:v2.11.0-ls258@sha256:4ffb1fdb8d284f5928394086e9d83d989930942af3786962bde7696100df78e2
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: "no"
+    # 和 web 落在同一个属主（PUID:PGID）上跑，直接以应用用户的身份动数据库。
+    user: "${PUID}:${PGID}"
+    working_dir: /app/www/public
+    environment:
+      DJANGO_SETTINGS_MODULE: babybuddy.settings.base
+      SECRET_KEY: $WONTON_SECRET_APP_KEY
+      # django.setup() 会把进程 TZ 改写回 settings.TIME_ZONE（UTC），这里另起名字带给初始化代码。
+      WONTON_TZ: ${TZ}
+      WONTON_OWNER_NAME: ${WONTON_OWNER_NAME}
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL}
+      WONTON_SECRET_ADMIN_PASSWORD: ${WONTON_SECRET_ADMIN_PASSWORD}
+      # 本容器没有 web 容器 init 做的 data→/config 软链，直接指到同一个数据库文件。
+      DB_NAME: /config/data/db.sqlite3
+    volumes:
+      - ${WONTON_APP_DATA}/config:/config
+    entrypoint:
+      - /lsiopy/bin/python3
+      - manage.py
+      - shell
+      - -c
+      - |
+        import os
+        if not os.path.isfile(os.environ["DB_NAME"]):
+            raise SystemExit(f"数据库不在 {os.environ['DB_NAME']}，web 未完成初始化？")
+        from django.contrib.auth import get_user_model
+        from babybuddy.models import Settings
+        users = get_user_model()
+        owner, _ = users.objects.update_or_create(
+            username=os.environ["WONTON_OWNER_NAME"],
+            defaults={
+                "email": os.environ["WONTON_OWNER_EMAIL"],
+                "is_staff": True,
+                "is_superuser": True,
+            },
+        )
+        # 界面语言和时区只有按用户的设置，没有全局环境变量；家人在应用的设置里自己选。
+        Settings.objects.update_or_create(
+            user=owner,
+            defaults={"language": "zh-hans", "timezone": os.environ["WONTON_TZ"]},
+        )
+        # 上游 migrate 在没有任何超管时会自动建 admin/admin；改成随机密码，弱口令不再能登。
+        admin = users.objects.filter(username="admin").first()
+        if admin:
+            admin.set_password(os.environ["WONTON_SECRET_ADMIN_PASSWORD"])
+            admin.save(update_fields=["password"])
 
 x-wonton:
-  spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.12"
+  id: app.babybuddy.family
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
-  icon: icon.svg
+  title: { zh: 育儿记录（Baby Buddy）, en: Baby Buddy }
+  description:
+    {
+      zh: "喂奶、换尿布、睡觉，点一下就记上，全家一起记宝宝的日常",
+      en: "Log feedings, diaper changes and sleep with one tap, together as a family",
+    }
+  icon: icon.png
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
+  screenshots: [screenshots/home.png, screenshots/timeline.png]
+  author: { name: geraldpeng6 }
+  homepage: https://babybuddy.app
+  # 应用（Baby Buddy）的许可证；镜像由 LinuxServer.io 打包。
   license: BSD-2-Clause
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [家庭, 育儿]
+    en: [Family, Parenting]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      像一本全家共用的育儿日记：喂奶、换尿布、睡觉、量身高体重，打开手机点一下就记上了，谁记的、几点记的一清二楚。当天的事按时间线排好，还有每天的统计图。
+
+      半夜单手也能记：常用的"喂奶""换尿布""睡觉"都是大按钮，正在进行的睡觉还能掐表计时。
+
+      登录用云吞的账号：主人打开就是管理员。家人各自打开就是各自的账号，主人在应用的"用户"里给他们选上"照看者"角色后就能一起记。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      A shared baby journal for the whole family: feedings, diaper changes, sleep, height and weight are one tap away, with who logged what always visible. The day is laid out on a timeline with daily statistics.
+
+      Big buttons make one-handed nighttime logging easy, and ongoing sleep sessions can be timed.
+
+      Sign-in uses your Wonton account: the owner opens the app as the administrator. Family members get their own accounts; once the owner assigns them the Caregiver role in the app's Users page, they can log together.
+  release_notes: { zh: "首个版本：喂奶、换尿布、睡觉等记录，云吞账号直接登录。", en: "First release: feedings, diaper changes, sleep and more, signed in with your Wonton account." }
   webui:
     service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
+    port: 8000
     sso: proxy
     proxy:
       headers:
         Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+  permissions:
+    # 要 WONTON_OWNER_NAME 把主人提为应用管理员。
+    - owner.identity
+  secrets:
+    # Django 的 SECRET_KEY。
+    app_key:
+      generate: { bytes: 64 }
+    # 上游 migrate 自动建的 admin 账号改成这个随机密码；主人在插件详情页可查。
+    admin_password:
+      generate: { bytes: 32 }
+      show_owner: { label: { zh: 管理员密码, en: Admin password } }
+  # 上游没写最低内存；空闲实测约 193M（docker stats，含 2 个 gunicorn worker），取 256M。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 256M

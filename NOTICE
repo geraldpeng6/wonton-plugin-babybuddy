@@ -1,7 +1,13 @@
 图标
 ====
 
-`icon.svg` 为本仓库原创，按插件规范的线条风格手写，未用图片模型生成。从模板新建的插件换成自己的图标时，这里按实际情况重写。
+`icon.png` 是 Baby Buddy 上游项目的官方应用图标，原样使用，未做修改。
+
+来源：https://github.com/babybuddy/babybuddy （仓库内 `babybuddy/static_src/logo/icon.png`）
+
+Baby Buddy 以 BSD-2-Clause 许可证发布（版权所有者见上游 LICENSE 文件）。Baby Buddy 名称和图标
+是其各自所有者的商标；本插件与其无隶属或背书关系。插件容器使用的镜像由 LinuxServer.io 打包
+（https://github.com/linuxserver/docker-babybuddy ），内含未修改的上游代码。
 
 许可证
 ------

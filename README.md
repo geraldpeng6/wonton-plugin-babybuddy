@@ -1,43 +1,30 @@
-# 云吞插件模板
+# 育儿记录（Baby Buddy）
 
-开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
+喂奶、换尿布、睡觉这些育儿记录，全家多人一起记，按钮大，半夜单手也能点。开发流程见[插件开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md)。
 
-这是一个能安装的示例插件 `app.example.hello`：使用 nginx 官方镜像显示问候页，经网关的 `sso: proxy` 注入用户名，页面显示“你好，<用户名>”。示例没有应用账号、持久化数据或 MCP 工具。
+## 用途
 
-## 示例文件
+宝宝出生后头几个月要频繁记事：几点喂的奶、哪边喂的、换了尿布、睡了多久。Baby Buddy 把这些做成大按钮，打开网页点一下就记上；当天的事按时间线排好，还有每天的统计。家里的每个人都能记，记录里能看到是谁记的。
 
-| 路径 | 内容 |
-| --- | --- |
-| `docker-compose.yml` | 示例清单、nginx 服务和三个 `configs` |
-| `web/default.conf.template` | nginx 配置，启用 SSI 回显用户名并提供健康检查入口；只放行来自核心地址（`${WONTON_CORE_ADDRESS}`）的请求，其余来源 403 |
-| `web/index.html` | 问候页 |
-| `web/tokens.css` | 页面主题变量的后备值 |
-| `tabs/` | 示例主页的应用页面图标 |
-| `screenshots/home.png` | 商店详情页的示例截图 |
-| `scripts/smoke-probes.sh` | 检查真实页面和网关注入身份的插件探针 |
+## 登录
 
-从模板创建自己的插件后，替换示例清单、网页和素材；具体步骤见[写插件](https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件)。
+网页经云吞网关代登录（`sso: proxy`）：打开插件就是登录状态，用的是云吞的账号。
 
-## 对着别的栈跑探针
+- 主人第一次打开前，插件已把主人设成应用的管理员，界面默认中文、时区跟云吞。
+- 家人第一次打开时，应用自动按云吞用户名建号。新账号只能看，不能记：主人在应用的**用户**页面给家人选上 **Caregiver（照看者）** 角色后，家人就能记了。也可以先把账号建好再告诉家人。
+- 上游首次安装会自动建一个 `admin` 账号，插件已把它的密码改成核心生成的随机密码（主人在插件详情页可查），原默认口令 `admin` 不能登录。
+- 想在别处用手机 App 或脚本调接口：在应用**用户**页给账号生成 API key，走 `/api/`（上游 REST 接口）。
 
-`probes`、`api`、`session` 按 `.wonton/.env` 的 `WONTON_BASE_DOMAIN` 拼核心地址，`up` 起的栈自己写这个键。插件装进别人的栈、或者对着已有环境排查时，把那套栈的基础域名写进 `.wonton/.env`，不要只按实例名猜地址：实例名只是资源名前缀，网关按 Host 认域名，拼错了会回“没有安装”。
+## 数据在哪
 
-```bash
-WONTON_BASE_DOMAIN=wonton.localhost
-```
+全部数据（SQLite 数据库、照片）在插件数据目录的 `config/` 子目录。卸载时保留数据，重装后还在；卸载时选删除数据才清掉。
 
-## 核心镜像
+## 已知限制
 
-检查和冒烟默认用套件里的核心镜像（`ghcr.io/wontonapp/wonton-core:main`）；要固定别的核心镜像，在仓库 Settings → Variables 设 `WONTON_CORE_IMAGE`，手动触发“检查”时填的 `core-image` 输入优先。
-
-## 更新开发套件
-
-```bash
-scripts/dev.sh kit-update
-```
-
-在从模板新建的插件仓库中更新套件；本仓库是套件源头，执行时只提示并退出。版本、可选引用和自定义脚本约定见[开发指南](https://github.com/wontonapp/wonton-docs/blob/main/develop.md#更新开发套件)。
+- 不出外网，不申请出网权限；应用本身没有需要联网的功能。
+- 界面语言和时间戳按应用里每个用户的设置生效（右上角用户 → 设置）：家人新账号默认英文、UTC，自己在设置里换中文和时区。
+- 官方 MCP 服务器在上游的独立仓库里且无官方镜像，本插件不提供 Agent 工具；上游有 REST `/api/`，等底座支持 REST 接入。
 
 ## 图标
 
-`icon.svg` 是本仓库原创线条图标，按本仓库 MIT 许可证分发，见 [NOTICE](NOTICE)。
+`icon.png` 来自上游项目，见 [NOTICE](NOTICE)。
